@@ -1,0 +1,73 @@
+<Project>
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <!--
+      Deliberately OFF. The DirectML provider package lags the base package by
+      a minor version, so it pulls a different Microsoft.Extensions.AI than
+      Microsoft.Agents.AI does. Transitive pinning turns that ordinary
+      resolution into a hard restore failure. Leave it off until the graph is
+      known-good, then consider switching it on.
+    -->
+    <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
+  </PropertyGroup>
+
+  <!--
+    ============================================================================
+    EXECUTION PROVIDER — DirectML.
+    Target machine: 8C/16T Ryzen-class, 16 GB DDR4-2667, NVIDIA GTX (4 GB VRAM),
+    AMD Radeon integrated, DirectX 12 FL 12.1, driver 32.0.15.6081 (2024-07-30).
+
+    Why DirectML over CUDA on this box:
+      - The 2024 driver predates current CUDA EP builds; no toolkit install needed.
+      - DirectML spills to shared GPU memory (7.7 GB here) when 4 GB VRAM fills.
+        CUDA hard-OOMs instead. With 4 GB that headroom matters.
+
+    VERSION NOTE — verified nuget.org 19 Aug 2026:
+      Microsoft.ML.OnnxRuntimeGenAI          0.15.2   (base, CPU)
+      Microsoft.ML.OnnxRuntimeGenAI.DirectML 0.14.1   <- one minor BEHIND
+      Microsoft.ML.OnnxRuntimeGenAI.Cuda     0.13.2
+    Provider packages trail the base package. Do not assume they match.
+    0.14.1 is still post-0.6, so the AppendTokenSequences API and the in-box
+    OnnxRuntimeGenAIChatClient are both present.
+    ============================================================================
+  -->
+  <ItemGroup Label="Edge inference — DirectML">
+    <PackageVersion Include="Microsoft.ML.OnnxRuntimeGenAI.DirectML" Version="0.14.1" />
+  </ItemGroup>
+
+  <ItemGroup Label="Agent orchestration — GA since 1.0 on 2026-04-02">
+    <PackageVersion Include="Microsoft.Agents.AI" Version="1.17.0" />
+    <!--
+      Microsoft.Extensions.AI is deliberately unpinned - it arrives transitively
+      via Microsoft.Agents.AI and OnnxRuntimeGenAI.Managed. If restore complains
+      about a missing version for a direct reference, pin at the version NuGet
+      actually resolved rather than guessing.
+    -->
+  </ItemGroup>
+
+  <ItemGroup Label="Data">
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="9.0.8" />
+  </ItemGroup>
+
+  <!--
+    ============================================================================
+    Never install two OnnxRuntimeGenAI provider packages at once. The resulting
+    DllNotFoundException names neither package. Verify with:
+        dotnet list package include-transitive | findstr OnnxRuntimeGenAI
+
+    Model folder MUST match the provider:
+      DirectML / CUDA  ->  gpu/gpu-int4-rtn-block-32          (Phi-4-mini)
+      CPU              ->  cpu_and_mobile/cpu-int4-rtn-block-32-acc-level-4
+    A CPU model folder loads fine under the DirectML package and silently runs
+    on the CPU. Edge.Doctor check 2 exists to catch exactly that.
+
+    FALLBACK to CPU (swap the ItemGroup above):
+      <PackageVersion Include="Microsoft.ML.OnnxRuntimeGenAI" Version="0.15.2" />
+
+    OPTIONAL Semantic Kernel path — both still -alpha as of 19 Aug 2026:
+      <PackageVersion Include="Microsoft.SemanticKernel" Version="1.77.0" />
+      <PackageVersion Include="Microsoft.SemanticKernel.Connectors.Onnx" Version="1.77.0-alpha" />
+      <PackageVersion Include="Microsoft.SemanticKernel.Agents.Core" Version="1.77.0-alpha" />
+    ============================================================================
+  -->
+</Project>

@@ -1,0 +1,27 @@
+<Project>
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <InvariantGlobalization>true</InvariantGlobalization>
+
+    <!--
+      Only needed on the Semantic Kernel path. Microsoft.Agents.AI is GA and
+      emits no experimental diagnostics, so on the MAF path this line is inert.
+      Left in place so switching paths doesn't cause a wall of build errors.
+        SKEXP0001 core abstractions | SKEXP0070 ONNX connector | SKEXP0110 agents
+    -->
+    <NoWarn>$(NoWarn);SKEXP0001;SKEXP0070;SKEXP0110</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup Label="Model location">
+    <!--
+      Every project reads PHI_MODEL_PATH / PHI_VISION_MODEL_PATH at runtime.
+      Never hard-code an absolute path in source — epic-level DoD requires
+      model paths to be configuration-driven.
+    -->
+    <!-- Models live on D:, outside the solution tree - machine-scoped, not repo-scoped. -->
+    <EdgeModelsRoot>D:\ai-models</EdgeModelsRoot>
+  </PropertyGroup>
+</Project>

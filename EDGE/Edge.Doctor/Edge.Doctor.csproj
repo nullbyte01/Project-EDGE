@@ -1,10 +1,16 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+	  <RootNamespace>Edge.Doctor</RootNamespace>
+	  <AssemblyName>edge-doctor</AssemblyName>
   </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.ML.OnnxRuntimeGenAI.DirectML" />
+  </ItemGroup>
 
 </Project>
