@@ -1,0 +1,8 @@
+<Solution>
+  <Project Path="Edge.Doctor/Edge.Doctor.csproj" />
+  <Project Path="Edge.Editorial/Edge.Editorial.csproj" />
+  <Project Path="Edge.ExpenseRouter/Edge.ExpenseRouter.csproj" />
+  <Project Path="Edge.NlToSql/Edge.NlToSql.csproj" />
+  <Project Path="Edge.PrReviewer/Edge.PrReviewer.csproj" />
+  <Project Path="Edge.VisionInspector/Edge.VisionInspector.csproj" />
+</Solution>
