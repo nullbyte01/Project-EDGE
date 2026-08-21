@@ -113,7 +113,12 @@ switch (declaredProvider)
         break;
     case "":
         if (pathSaysGpu)
-            Warn("Path looks like a GPU build but config declares no provider.");
+        {
+            // Expected, not a problem. The official config reference shows
+            // "provider_options": [] as the default even for GPU builds - the
+            // provider is selected at runtime, which check 2 now does.
+            Note("Config declares no provider (normal). Check 2 requests it at runtime.");
+        }
         else
         {
             Warn("This is a CPU model build. Under the DirectML package it will");
@@ -131,11 +136,36 @@ switch (declaredProvider)
 // ── 2. Native runtime ───────────────────────────────────────────────────────
 Section("2. Native runtime");
 
+// Set this to "cpu" to deliberately run CPU-only without failing the gate.
+var wantProvider = Environment.GetEnvironmentVariable("EDGE_PROVIDER") ?? "dml";
+
 Model? model = null;
 try
 {
     var sw = Stopwatch.StartNew();
     using var config = new Config(modelPath);
+
+    // THIS IS THE STEP THAT WAS MISSING. The generated genai_config.json ships
+    // with "provider_options": [] - the official config reference shows that as
+    // the default, including for GPU builds. The execution provider is selected
+    // at RUNTIME, not baked into the file. Without these two calls GenAI falls
+    // back to CPU silently: no error, no warning, roughly a fifth of the speed.
+    if (!wantProvider.Equals("cpu", StringComparison.OrdinalIgnoreCase))
+    {
+        try
+        {
+            config.ClearProviders();
+            config.AppendProvider(wantProvider);
+            Pass($"requested provider: {wantProvider}");
+        }
+        catch (Exception ex)
+        {
+            Warn($"Could not request '{wantProvider}': {ex.GetType().Name}: {ex.Message}");
+            Note("Falling back to whatever the config declares - expect CPU speed.");
+        }
+    }
+    else Note("EDGE_PROVIDER=cpu - running CPU-only by request.");
+
     model = new Model(config);
     Pass($"model loaded in {sw.ElapsedMilliseconds} ms");
 }
@@ -166,58 +196,128 @@ var directMlLoaded = Process.GetCurrentProcess().Modules
     .Cast<ProcessModule>()
     .Any(m => (m.ModuleName ?? "").Contains("DirectML", StringComparison.OrdinalIgnoreCase));
 
-if (directMlLoaded) Pass("DirectML.dll loaded");
-else Warn("DirectML.dll not loaded - this process is running on the CPU.");
+if (wantProvider.Equals("cpu", StringComparison.OrdinalIgnoreCase))
+{
+    Note("CPU run requested - skipping provider verification.");
+}
+else if (directMlLoaded)
+{
+    Pass("DirectML.dll loaded");
+}
+else
+{
+    // Previously a WARN, which let the gate report GREEN while running on the
+    // CPU at a fifth of the expected speed. A gate that passes when the thing
+    // it exists to verify did not happen is worse than no gate.
+    Fail("DirectML.dll not loaded - this process is running on the CPU.");
+    Note("Check, in order:");
+    Note("  1. Did check 2 print 'requested provider: dml'? If it errored,");
+    Note("     the installed package cannot serve DirectML.");
+    Note("  2. dotnet list package --include-transitive | findstr OnnxRuntimeGenAI");
+    Note("     Expect ONLY .DirectML and .Managed - never the base package too.");
+    Note("  3. Is PHI_MODEL_PATH the gpu/ folder, not cpu_and_mobile/ ?");
+    Note("To accept CPU deliberately: set EDGE_PROVIDER=cpu and re-run.");
+}
 
 // ── 3. Throughput ───────────────────────────────────────────────────────────
-Section("3. Throughput");
+Section("3. Template & throughput");
 
 Note("Watch Task Manager > Performance > GPU 1 now. Flat 0% during");
 Note("generation means DirectML chose the integrated Radeon, not the GTX.");
 
-var output = "";
-try
+using var tokenizer = new Tokenizer(model);
+var measuredTps = 0.0;   // set by 3b, reused by check 4
+
+// One generation helper for both probes below. Time-to-first-token is captured
+// separately from decode time: TTFT is prefill (a one-off cost), decode rate is
+// what actually governs how long an agent turn takes.
+(string Text, int Tokens, TimeSpan Ttft, TimeSpan Total) Generate(string prompt, int maxLength)
 {
-    using var tokenizer = new Tokenizer(model);
     using var stream = tokenizer.CreateStream();
+    var sequences = tokenizer.Encode(prompt);
 
-    // Phi-4-mini / Phi-3.x template. A wrong template does not throw - it
-    // degrades quietly into rambling or prompt echo, so the reply is checked
-    // against an exact expected word below.
-    var sequences = tokenizer.Encode(
-        "<|user|>Reply with exactly the word: READY<|end|><|assistant|>");
+    using var genParams = new GeneratorParams(model!);
+    genParams.SetSearchOption("max_length", maxLength);
 
-    using var genParams = new GeneratorParams(model);
-    genParams.SetSearchOption("max_length", 64);
+    using var generator = new Generator(model!, genParams);
 
-    using var generator = new Generator(model, genParams);
+    // Timer starts BEFORE AppendTokenSequences on purpose. That call runs the
+    // prefill pass, so starting the clock after it reported "TTFT 0 ms" - the
+    // first GenerateNextToken was only sampling from logits already computed.
+    // Real time-to-first-token is prefill + first decode step.
+    var sw = Stopwatch.StartNew();
     generator.AppendTokenSequences(sequences);   // 0.6+ API; replaced SetInputSequences
 
-    var sw = Stopwatch.StartNew();
+    var ttft = TimeSpan.Zero;
     var buffer = new StringBuilder();
-    var generated = 0;
+    var count = 0;
 
     while (!generator.IsDone())
     {
         generator.GenerateNextToken();           // 0.6+ folded in ComputeLogits
+        if (count == 0) ttft = sw.Elapsed;
         buffer.Append(stream.Decode(generator.GetSequence(0)[^1]));
-        generated++;
+        count++;
     }
     sw.Stop();
 
-    output = buffer.ToString().Trim();
-    var tps = generated / Math.Max(sw.Elapsed.TotalSeconds, 0.001);
-    Pass($"{generated} tokens in {sw.Elapsed.TotalSeconds:F1}s -> {Green}{tps:F1} tok/s{Reset}");
-    Note($"model said: \"{Truncate(output, 60)}\"");
+    return (buffer.ToString().Trim(), count, ttft, sw.Elapsed);
+}
+
+// ── 3a. Chat template ───────────────────────────────────────────────────────
+// A wrong template does not throw. It degrades quietly into rambling or prompt
+// echo, which is expensive to diagnose from inside an agent loop.
+try
+{
+    var probe = Generate("<|user|>Reply with exactly the word: READY<|end|><|assistant|>", 64);
+    Note($"model said: \"{Truncate(probe.Text, 60)}\"");
+
+    if (probe.Text.Contains("READY", StringComparison.OrdinalIgnoreCase))
+        Pass("chat template applied correctly");
+    else
+    {
+        Warn("Model ignored a trivial instruction - chat template likely wrong.");
+        Note("Expected: <|user|>...<|end|><|assistant|>");
+    }
+}
+catch (Exception ex)
+{
+    Fail($"Template probe failed - {ex.GetType().Name}: {ex.Message}");
+    Note("If this mentions ComputeLogits or SetInputSequences you are on a");
+    Note("pre-0.6 package. Pin OnnxRuntimeGenAI.DirectML 0.14.1.");
+}
+
+// ── 3b. Decode throughput ───────────────────────────────────────────────────
+// Measured over a LONG generation on purpose. The earlier version used the
+// two-token READY probe, where prefill dominated and the resulting tok/s was
+// meaningless. A short sample does not measure decode rate, it measures startup.
+try
+{
+    var run = Generate(
+        "<|user|>Count from 1 to 80. Output only the numbers separated by commas.<|end|><|assistant|>",
+        512);
+
+    var decodeTokens = Math.Max(run.Tokens - 1, 0);
+    var decodeSeconds = Math.Max((run.Total - run.Ttft).TotalSeconds, 0.001);
+    var tps = decodeTokens / decodeSeconds;
+    measuredTps = tps;
+
+    Note($"TTFT (prefill + first token) {run.Ttft.TotalMilliseconds:F0} ms");
+
+    if (run.Tokens < 20)
+    {
+        Warn($"Only {run.Tokens} tokens generated - sample too small to trust.");
+        Note("The model stopped early. Rate below is indicative only.");
+    }
+
+    Pass($"{decodeTokens} decode tokens in {decodeSeconds:F1}s -> {Green}{tps:F1} tok/s{Reset}");
 
     // Landing in the CPU band while on the DirectML package means something
     // upstream is wrong, not that the GPU is slow.
     if (tps < CpuCeiling)
     {
         Warn($"{tps:F1} tok/s is CPU-range. The GPU is probably not being used.");
-        Note("Check, in order: (a) is PHI_MODEL_PATH the gpu/ folder, not");
-        Note("cpu_and_mobile/  (b) did DirectML.dll load in check 2");
-        Note("(c) did GPU 1 move in Task Manager  (d) is host RAM under pressure.");
+        Note("See check 2's guidance - the provider, not the hardware, is the suspect.");
         Note($"At this rate a 400-token turn takes ~{400 / tps:F0}s, so");
         Note($"EDGE-101's six-turn loop would run ~{6 * 400 / tps / 60:F0} minutes.");
         Note($"To keep that loop under 5 min, cut MaxTokens to ~{(int)(300 * tps / 6)}.");
@@ -233,20 +333,7 @@ try
 }
 catch (Exception ex)
 {
-    Fail($"Generation failed - {ex.GetType().Name}: {ex.Message}");
-    Note("If this mentions ComputeLogits or SetInputSequences you are on a");
-    Note("pre-0.6 package. Pin OnnxRuntimeGenAI.DirectML 0.14.1.");
-}
-
-if (output.Length > 0)
-{
-    if (output.Contains("READY", StringComparison.OrdinalIgnoreCase))
-        Pass("chat template applied correctly");
-    else
-    {
-        Warn("Model ignored a trivial instruction - chat template likely wrong.");
-        Note("Expected: <|user|>...<|end|><|assistant|>");
-    }
+    Fail($"Throughput run failed - {ex.GetType().Name}: {ex.Message}");
 }
 
 // ── 4. IChatClient bridge ───────────────────────────────────────────────────
@@ -285,6 +372,19 @@ try
 
     Pass($"IChatClient responded in {sw.ElapsedMilliseconds} ms");
     Note($"model said: \"{Truncate(response.Text.Trim(), 60)}\"");
+
+    // The chat-client path carries per-call setup the raw Generator loop does
+    // not. It is not a failure, but it compounds: an agent loop pays it once
+    // per turn, so EDGE-101/103 must budget for it on top of decode time.
+    if (measuredTps > 0 && sw.Elapsed.TotalSeconds > 2)
+    {
+        var rawEquivalent = 64 / measuredTps;
+        Warn($"{sw.Elapsed.TotalSeconds:F1}s for a short reply vs ~{rawEquivalent:F1}s of decode at {measuredTps:F0} tok/s.");
+        Note("The chat client adds per-call overhead the raw loop avoids.");
+        Note($"Budget ~{sw.Elapsed.TotalSeconds:F0}s per agent turn on top of generation");
+        Note("when estimating EDGE-101 and EDGE-103.");
+    }
+
     Pass("ChatClientAgent (Microsoft.Agents.AI) is wireable on this machine");
 }
 catch (Exception ex)
