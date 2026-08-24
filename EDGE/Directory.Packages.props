@@ -10,7 +10,6 @@
     -->
     <CentralPackageTransitivePinningEnabled>false</CentralPackageTransitivePinningEnabled>
   </PropertyGroup>
-
   <!--
     ============================================================================
     EXECUTION PROVIDER — DirectML.
@@ -34,9 +33,8 @@
   <ItemGroup Label="Edge inference — DirectML">
     <PackageVersion Include="Microsoft.ML.OnnxRuntimeGenAI.DirectML" Version="0.14.1" />
   </ItemGroup>
-
   <ItemGroup Label="Agent orchestration — GA since 1.0 on 2026-04-02">
-    <PackageVersion Include="Microsoft.Agents.AI" Version="1.17.0" />
+    <PackageVersion Include="Microsoft.Agents.AI" Version="1.19.0" />
     <!--
       Microsoft.Extensions.AI is deliberately unpinned - it arrives transitively
       via Microsoft.Agents.AI and OnnxRuntimeGenAI.Managed. If restore complains
@@ -44,11 +42,9 @@
       actually resolved rather than guessing.
     -->
   </ItemGroup>
-
   <ItemGroup Label="Data">
     <PackageVersion Include="Microsoft.Data.Sqlite" Version="9.0.8" />
   </ItemGroup>
-
   <!--
     ============================================================================
     Never install two OnnxRuntimeGenAI provider packages at once. The resulting
