@@ -50,7 +50,7 @@ namespace Edge.PrReviewer
                 //
                 // Checked ONLY on Reviewer output. Scoping it this way is what
                 // stops the Revisor approving its own work.
-                if (verdict.Content.Contains(_sentinel, StringComparison.Ordinal))
+                if (HasSentinel(verdict.Content, _sentinel))
                     return new ReviewResult(true, round, transcript);
 
                 await TurnAsync(_revisor, history, cancellationToken, progress, transcript);
@@ -74,12 +74,33 @@ namespace Edge.PrReviewer
             sw.Stop();
 
             var text = response.Text?.Trim() ?? string.Empty;
-            history.Add(new ChatMessage(ChatRole.Assistant, text));
+
+            if (persona.Name == _revisor.Name && CodeBlock.TryExtract(text, out var cleanCode))
+            {
+                history.Add(new ChatMessage(ChatRole.Assistant, $"```csharp\n{cleanCode}\n```"));
+            }
+            else
+            {
+                history.Add(new ChatMessage(ChatRole.Assistant, text));
+            }
 
             var turn = new ReviewTurn(persona.Name, text, sw.Elapsed);
             transcript.Add(turn);
             progress?.Report(turn);
             return turn;
+        }
+
+        private static bool HasSentinel(string text, string sentinel)
+        {
+            if (string.IsNullOrWhiteSpace(text)) return false;
+
+            // Check the last few lines rather than arbitrary positions in text
+            var lines = text.Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length == 0) return false;
+
+            var lastLine = lines[^1].Trim('`', '"', '\'', '*', ' ', '.');
+            return lastLine.Equals(sentinel, StringComparison.Ordinal)
+                || (lines.Length > 1 && lines[^2].Trim('`', '"', '\'', '*', ' ', '.').Equals(sentinel, StringComparison.Ordinal));
         }
     }
 }

@@ -42,20 +42,12 @@ public static class CodeBlock
         return code.Length > 0;
     }
 
-    public static string Extract(string? raw)
-    {
-        return TryExtract(raw, out var code)
-             ? code
-             : throw new FormatException("No code block found in revisor output.");
-    }
+    private static readonly string[] CsharpKeywords =
+    ["public", "private", "protected", "internal", "void", "class", "record", "struct", "namespace", "using ", "var "];
 
     private static bool LooksLikeCsharp(string text)
     {
-        return text.Contains('{') && text.Contains('}') &&
-        (text.Contains("public", StringComparison.Ordinal) ||
-         text.Contains("private", StringComparison.Ordinal) ||
-         text.Contains("void", StringComparison.Ordinal) ||
-         text.Contains("class", StringComparison.Ordinal) ||
-         text.Contains("var ", StringComparison.Ordinal));
+        return (text.Contains('{') && text.Contains('}')) ||
+        CsharpKeywords.Any(k => text.Contains(k, StringComparison.Ordinal));
     }
 }
