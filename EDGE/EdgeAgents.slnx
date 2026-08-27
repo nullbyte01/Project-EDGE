@@ -1,4 +1,7 @@
 <Solution>
+  <Folder Name="/Tests/">
+    <Project Path="Edge.PrReviewer.Tests/Edge.PrReviewer.Tests.csproj" Id="1177c9b2-0bda-4590-863c-bd4886f37e92" />
+  </Folder>
   <Project Path="Edge.Doctor/Edge.Doctor.csproj" />
   <Project Path="Edge.Editorial/Edge.Editorial.csproj" />
   <Project Path="Edge.ExpenseRouter/Edge.ExpenseRouter.csproj" />
