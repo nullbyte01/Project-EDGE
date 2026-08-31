@@ -1,63 +1,63 @@
 ﻿using Edge.NlToSql;
 
-Console.WriteLine("--- Verifying EDGE-102.1 ACs ---");
+Console.WriteLine("--- Verifying EDGE-102.2 ACs ---\n");
 
-// AC 1: DumpSchema returns 3 CREATE TABLE statements and no internal sqlite_% tables
-using var db1 = AnalyticsDatabase.CreateSeeded("analytics_test_1");
-var schema = db1.DumpSchema();
+using var db = AnalyticsDatabase.CreateSeeded($"test_guard_{Guid.NewGuid():N}");
+var executor = new SqlExecutor(db.Connection);
 
-Console.WriteLine($"Schema is : {schema}");
+// ── AC 1: DROP, DELETE, UPDATE, INSERT, and PRAGMA are all refused ──────────
+string[] mutatingStatements =
+[
+    "DROP TABLE customers",
+    "DELETE FROM orders WHERE id = 1",
+    "UPDATE customers SET city = 'Valsad' WHERE id = 1",
+    "INSERT INTO customers VALUES (10, 'Test User', 'Surat', '2026-08-31')",
+    "PRAGMA table_info(customers)"
+];
 
-var hasCustomers = schema.Contains("CREATE TABLE customers", StringComparison.OrdinalIgnoreCase);
-var hasOrders = schema.Contains("CREATE TABLE orders", StringComparison.OrdinalIgnoreCase);
-var hasOrderItems = schema.Contains("CREATE TABLE order_items", StringComparison.OrdinalIgnoreCase);
-var hasNoSqliteInternals = !schema.Contains("sqlite_", StringComparison.OrdinalIgnoreCase);
-
-Console.WriteLine($"[AC 1] Schema contains 3 tables: {hasCustomers && hasOrders && hasOrderItems}");
-Console.WriteLine($"[AC 1] No sqlite_% tables: {hasNoSqliteInternals}");
-
-// AC 2: A three-table join returns rows
-using var joinCmd = db1.Connection.CreateCommand();
-joinCmd.CommandText = """
-    SELECT c.name, o.id, oi.product, oi.unit_price
-    FROM customers c
-    JOIN orders o ON o.customer_id = c.id
-    JOIN order_items oi ON oi.order_id = o.id;
-""";
-
-using var reader = joinCmd.ExecuteReader();
-var rowCount = 0;
-while (reader.Read())
+var ac1Passed = mutatingStatements.All(sql =>
 {
-    rowCount++;
+    var check = SqlGuard.Check(sql);
+    return !check.Allowed;
+});
+Console.WriteLine($"[AC 1] Mutating statements (DROP, DELETE, UPDATE, INSERT, PRAGMA) refused: {ac1Passed}");
+
+// ── AC 2: Stacked statements are refused ─────────────────────────────────────
+var stackedSql = "SELECT 1; DROP TABLE orders";
+var stackedCheck = SqlGuard.Check(stackedSql);
+var ac2Passed = !stackedCheck.Allowed && stackedCheck.Reason == SqlRejection.StackedStatements;
+Console.WriteLine($"[AC 2] Stacked statements ('SELECT 1; DROP TABLE orders') refused: {ac2Passed}");
+
+// ── AC 3: 'created' keyword in WHERE clause is allowed ───────────────────────
+var allowedWordSql = "SELECT COUNT(*) FROM orders WHERE status = 'created'";
+var allowedCheck = SqlGuard.Check(allowedWordSql);
+var ac3Passed = allowedCheck.Allowed;
+Console.WriteLine($"[AC 3] 'WHERE status = ''created''' allowed (word boundary check): {ac3Passed}");
+
+// ── AC 4: EXPLAIN rejects an unknown table without executing anything ────────
+var badSql = "SELECT * FROM non_existent_table";
+var validationPassed = !executor.TryValidate(badSql, out var validationError)
+                       && !string.IsNullOrWhiteSpace(validationError);
+Console.WriteLine($"[AC 4] EXPLAIN rejects unknown table with error ('{validationError}'): {validationPassed}");
+
+// ── AC 5: Run() re-checks the guard even when called directly ────────────────
+var ac5Passed = false;
+try
+{
+    executor.Run("DROP TABLE customers");
 }
-Console.WriteLine($"[AC 2] 3-Table Join returned rows: {rowCount > 0} ({rowCount} rows found)");
-
-// AC 3: Two instances with different names do not see each other's data
-using var db2 = AnalyticsDatabase.CreateSeeded("analytics_test_2");
-
-// Insert an extra customer into db2 only
-using var insertCmd = db2.Connection.CreateCommand();
-insertCmd.CommandText = "INSERT INTO customers VALUES (99, 'Test Isolation', 'Surat', '2026-08-31');";
-insertCmd.ExecuteNonQuery();
-
-// Check if db1 sees the new customer from db2
-using var checkDb1Cmd = db1.Connection.CreateCommand();
-checkDb1Cmd.CommandText = "SELECT COUNT(*) FROM customers WHERE id = 99;";
-var db1Count = Convert.ToInt32(checkDb1Cmd.ExecuteScalar());
-
-using var checkDb2Cmd = db2.Connection.CreateCommand();
-checkDb2Cmd.CommandText = "SELECT COUNT(*) FROM customers WHERE id = 99;";
-var db2Count = Convert.ToInt32(checkDb2Cmd.ExecuteScalar());
-
-var isIsolated = (db1Count == 0) && (db2Count == 1);
-Console.WriteLine($"[AC 3] Databases are isolated by name: {isIsolated}");
-
-if (hasCustomers && hasOrders && hasOrderItems && hasNoSqliteInternals && (rowCount > 0) && isIsolated)
+catch (InvalidOperationException ex) when (ex.Message.Contains("Blocked by guard"))
 {
-    Console.WriteLine("\n[PASS] All EDGE-102.1 Acceptance Criteria verified!");
+    ac5Passed = true;
+}
+Console.WriteLine($"[AC 5] Run() directly blocks mutating statements: {ac5Passed}");
+
+// ── Summary ─────────────────────────────────────────────────────────────────
+if (ac1Passed && ac2Passed && ac3Passed && validationPassed && ac5Passed)
+{
+    Console.WriteLine("\n[PASS] All EDGE-102.2 Acceptance Criteria verified successfully!");
 }
 else
 {
-    Console.Error.WriteLine("\n[FAIL] One or more criteria failed.");
+    Console.Error.WriteLine("\n[FAIL] One or more Acceptance Criteria failed.");
 }
