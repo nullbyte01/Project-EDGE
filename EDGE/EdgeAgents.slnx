@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/Tests/">
+    <Project Path="Edge.NlToSql.Tests/Edge.NlToSql.Tests.csproj" Id="4af6c7a2-01ae-4396-abf9-36237aca36e1" />
     <Project Path="Edge.PrReviewer.Tests/Edge.PrReviewer.Tests.csproj" Id="1177c9b2-0bda-4590-863c-bd4886f37e92" />
   </Folder>
   <Project Path="Edge.Doctor/Edge.Doctor.csproj" />
