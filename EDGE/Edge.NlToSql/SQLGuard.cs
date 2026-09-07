@@ -41,7 +41,6 @@ public static partial class SqlGuard
                       .Replace("```", "")
                       .Trim();
 
-        // Take everything from the first SELECT or WITH, discarding any preamble.
         var select = text.IndexOf("SELECT", StringComparison.OrdinalIgnoreCase);
         var with = text.IndexOf("WITH", StringComparison.OrdinalIgnoreCase);
 
@@ -55,7 +54,29 @@ public static partial class SqlGuard
 
         if (start >= 0) text = text[start..];
 
-        return text.Trim().TrimEnd(';').TrimEnd();
+        text = text.Trim();
+
+        // Clean up stray quotes wrapped after semicolons
+        if (text.EndsWith(";\"") || text.EndsWith(";'"))
+        {
+            text = text[..^1];
+        }
+
+        text = text.TrimEnd(';', '`', ' ', '\r', '\n');
+
+        // Strip unmatched trailing quotes
+        if (text.EndsWith('\'') && text.Count(c => c == '\'') % 2 != 0)
+        {
+            text = text[..^1];
+        }
+
+        // Strip unmatched trailing closing parentheses
+        while (text.EndsWith(')') && text.Count(c => c == '(') < text.Count(c => c == ')'))
+        {
+            text = text[..^1].TrimEnd();
+        }
+
+        return text.Trim();
     }
 
     public static SqlCheck Check(string? sql)

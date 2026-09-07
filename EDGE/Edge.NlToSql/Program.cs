@@ -1,106 +1,130 @@
-﻿using Edge.NlToSql;
+﻿// ============================================================================
+// EDGE-102 — Edge Natural Language-to-SQL Generator.
+//
+// WIRING ONLY. Model load, database seed, REPL, rendering. Every decision that
+// could be wrong — sanitising, the read-only guard, EXPLAIN validation, the
+// repair budget — lives in SqlGuard.cs, SqlExecutor.cs and NlToSqlEngine.cs,
+// where it is unit-tested (EDGE-102.5).
+//
+// Usage:
+//   nl2sql [--provider dml|cpu]
+//
+// REPL commands:
+//   \schema   print the CREATE TABLE statements sent to the model
+//   \sql      print the SQL generated for the last question
+//   \q        quit
+// ============================================================================
+
+using Edge.NlToSql;
 using Microsoft.Extensions.AI;
+using Microsoft.ML.OnnxRuntimeGenAI;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
 
-Console.WriteLine("--- Verifying EDGE-102.3 ACs ---\n");
+using var oga = new OgaHandle();
 
-using var db = AnalyticsDatabase.CreateSeeded($"test_102_3_{Guid.NewGuid():N}");
+var provider = ArgValue("--provider") ?? Environment.GetEnvironmentVariable("EDGE_PROVIDER") ?? "dml";
+
+var modelPath = Environment.GetEnvironmentVariable("PHI_MODEL_PATH");
+if (string.IsNullOrWhiteSpace(modelPath) || !Directory.Exists(modelPath))
+{
+    Console.Error.WriteLine("PHI_MODEL_PATH is not set or does not exist. See EDGE-100.2.");
+    return 69;
+}
+
+// ── Database ────────────────────────────────────────────────────────────────
+using var db = AnalyticsDatabase.CreateSeeded();
 var schema = db.DumpSchema();
 var executor = new SqlExecutor(db.Connection);
+Console.WriteLine("Database seeded (customers, orders, order_items).");
 
-// ── AC 1: Valid join query passes EXPLAIN on first attempt ─────────────────
-var joinSql = """
-    SELECT c.name 
-    FROM customers c 
-    JOIN orders o ON o.customer_id = c.id 
-    JOIN order_items oi ON oi.order_id = o.id 
-    WHERE oi.product LIKE '%Monitor%';
-    """;
+// ── Model ───────────────────────────────────────────────────────────────────
+Console.WriteLine($"Loading model ({provider})...");
+var loadTimer = Stopwatch.StartNew();
 
-var client1 = new ScriptedChatClient(joinSql);
-var engine1 = new NlToSqlEngine(client1, executor, schema);
-var res1 = await engine1.GenerateAsync("Which customers ordered a monitor?");
+using var config = new Config(modelPath);
 
-var ac1Passed = res1.Outcome == SqlOutcome.Generated
-             && res1.ModelCalls == 1
-             && executor.TryValidate(res1.Sql, out _);
-Console.WriteLine($"[AC 1] Valid join passes EXPLAIN on first attempt: {ac1Passed}");
-
-// ── AC 2: Markdown fences and semicolons are stripped ───────────────────────
-var fencedSql = "```sql\nSELECT COUNT(*) FROM orders;\n```";
-var client2 = new ScriptedChatClient(fencedSql);
-var engine2 = new NlToSqlEngine(client2, executor, schema);
-var res2 = await engine2.GenerateAsync("How many orders?");
-
-var ac2Passed = res2.Sql == "SELECT COUNT(*) FROM orders"
-             && !res2.Sql.Contains("```")
-             && !res2.Sql.EndsWith(';');
-Console.WriteLine($"[AC 2] Strips markdown fences and trailing semicolons: {ac2Passed}");
-
-// ── AC 3: Non-existent table triggers exactly ONE repair round ─────────────
-var client3 = new ScriptedChatClient(
-    "SELECT * FROM non_existent_table", // Attempt 1 (fails EXPLAIN)
-    "SELECT * FROM customers"           // Attempt 2 (repair succeeds)
-);
-var engine3 = new NlToSqlEngine(client3, executor, schema);
-var res3 = await engine3.GenerateAsync("List suppliers");
-
-var ac3Passed = res3.Outcome == SqlOutcome.Repaired
-             && res3.ModelCalls == 2
-             && res3.Sql == "SELECT * FROM customers";
-Console.WriteLine($"[AC 3] Triggers exactly one repair round when table is invalid: {ac3Passed}");
-
-// ── AC 4: Prompt template dialect rules enforce SQLite (LIMIT, not TOP) ────
-var promptText = Prompt.Generate(schema, "Show top 5 orders");
-var ac4Passed = promptText.Contains("Use LIMIT, never TOP")
-             && promptText.Contains("Use date(), never GETDATE()");
-Console.WriteLine($"[AC 4] Prompt rules reinforce SQLite dialect (no TOP/GETDATE): {ac4Passed}");
-
-// ── AC 5: SqlGuard applies to repaired SQL (destructive repair is blocked) ─
-var client5 = new ScriptedChatClient(
-    "SELECT * FROM non_existent_table", // Attempt 1 (fails EXPLAIN)
-    "DROP TABLE orders"                 // Attempt 2 (destructive repair)
-);
-var engine5 = new NlToSqlEngine(client5, executor, schema);
-var res5 = await engine5.GenerateAsync("Clear orders");
-
-var ac5Passed = res5.Outcome == SqlOutcome.Blocked
-             && res5.ModelCalls == 2
-             && !string.IsNullOrWhiteSpace(res5.Error);
-Console.WriteLine($"[AC 5] SqlGuard blocks destructive repaired SQL: {ac5Passed}");
-
-// ── Summary ─────────────────────────────────────────────────────────────────
-if (ac1Passed && ac2Passed && ac3Passed && ac4Passed && ac5Passed)
+// MANDATORY. genai_config.json ships "provider_options": [] even for GPU
+// builds — the provider is chosen at runtime. Skip this and GenAI silently
+// falls back to CPU at roughly a fifth of the speed.
+if (!provider.Equals("cpu", StringComparison.OrdinalIgnoreCase))
 {
-    Console.WriteLine("\n[PASS] All EDGE-102.3 Acceptance Criteria verified successfully!");
-}
-else
-{
-    Console.Error.WriteLine("\n[FAIL] One or more Acceptance Criteria failed.");
+    config.ClearProviders();
+    config.AppendProvider(provider);
 }
 
-// ── Test Double Helper ───────────────────────────────────────────────────────
-file sealed class ScriptedChatClient(params string[] responses) : IChatClient
+using var model = new Model(config);
+loadTimer.Stop();
+
+// ONE client, reused for every question in the session. In a REPL this matters
+// more than anywhere else — if the EDGE-101.1 spike found the chat-client
+// overhead to be per-instance, this is what keeps it off every question.
+IChatClient chat = new OnnxRuntimeGenAIChatClient(model);
+var engine = new NlToSqlEngine(chat, executor, schema);
+
+Console.WriteLine($"Model ready in {loadTimer.Elapsed.TotalSeconds:F1}s.");
+Console.WriteLine(@"Ask a question, or \schema, \sql, \q." + "\n");
+
+// ── REPL ────────────────────────────────────────────────────────────────────
+var lastSql = "(none yet)";
+
+while (true)
 {
-    private readonly Queue<string> _queue = new(responses);
+    Console.Write("ask> ");
+    var question = Console.ReadLine();
 
-    public Task<ChatResponse> GetResponseAsync(
-        IEnumerable<ChatMessage> chatMessages,
-        ChatOptions? options = null,
-        CancellationToken cancellationToken = default)
+    if (question is null or "\\q") break;
+    if (string.IsNullOrWhiteSpace(question)) continue;
+
+    if (question == "\\schema") { Console.WriteLine($"\n{schema}\n"); continue; }
+    if (question == "\\sql") { Console.WriteLine($"\n{lastSql}\n"); continue; }
+
+    var sw = Stopwatch.StartNew();
+    var generation = await engine.GenerateAsync(question);
+    sw.Stop();
+
+    lastSql = generation.Sql;
+
+    switch (generation.Outcome)
     {
-        var text = _queue.Count > 0 ? _queue.Dequeue() : string.Empty;
-        var response = new ChatResponse(new ChatMessage(ChatRole.Assistant, text));
-        return Task.FromResult(response);
+        case SqlOutcome.Blocked:
+            Console.WriteLine($"\n[blocked] {generation.Error}");
+            Console.WriteLine($"          {generation.Sql}\n");
+            continue;
+
+        case SqlOutcome.Failed:
+            Console.WriteLine($"\n[failed after repair] {generation.Error}");
+            Console.WriteLine($"          {generation.Sql}\n");
+            continue;
+
+        case SqlOutcome.Repaired:
+            Console.WriteLine($"\n[repaired] first attempt failed: {generation.Error}");
+            break;
     }
 
-    public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
-        IEnumerable<ChatMessage> chatMessages,
-        ChatOptions? options = null,
-        CancellationToken cancellationToken = default)
+    // Echo the SQL before the rows. The user should always be able to audit
+    // what actually ran against the database.
+    Console.WriteLine($"\n\u001b[90m{generation.Sql}\u001b[0m\n");
+
+    try
     {
-        throw new NotImplementedException();
+        var result = executor.Run(generation.Sql);
+        Console.WriteLine(result.ToAsciiTable());
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[execution error] {ex.Message}");
     }
 
-    public object? GetService(Type serviceType, object? serviceKey = null) => null;
-    public void Dispose() { }
+    Console.WriteLine(
+        $"\n\u001b[90m{sw.Elapsed.TotalSeconds:F1}s, {generation.ModelCalls} model call(s)\u001b[0m\n");
+}
+
+(chat as IDisposable)?.Dispose();
+return 0;
+
+string? ArgValue(string name)
+{
+    var i = Array.IndexOf(args, name);
+    return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
 }
